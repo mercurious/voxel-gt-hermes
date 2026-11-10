@@ -1,0 +1,56 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>VOXEL TURISMO — voxel GT racing</title>
+<link rel="stylesheet" href="style.css">
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+</script>
+</head>
+<body>
+<canvas id="gl"></canvas>
+
+<div id="menu">
+  <div id="brand">
+    <h1>VOXEL <span>TURISMO</span></h1>
+    <p>A voxel tribute to Gran Turismo · 5 real legend cars · 3 real circuits</p>
+  </div>
+  <div class="panels">
+    <div class="panel">
+      <h2>SELECT CAR</h2>
+      <div id="carList"></div>
+    </div>
+    <div class="panel">
+      <h2>SELECT TRACK</h2>
+      <div id="trackList"></div>
+      <button id="startBtn">START RACE ▸</button>
+      <p class="help">WASD / arrows drive · SPACE handbrake drift · R respawn · ESC menu · M mute · ENTER start</p>
+    </div>
+  </div>
+</div>
+
+<div id="hud" class="hidden">
+  <div id="tags"><b id="carTag"></b><span id="trackTag"></span><span id="lapsTag"></span></div>
+  <div id="standings"><span>POS</span><b id="pos">4/4</b></div>
+  <div id="times"><span>TIME <i id="time">00:00.000</i></span><span>BEST <i id="best">--:--.---</i></span></div>
+  <div id="dash">
+    <div id="gearbox"><b id="gear">N</b></div>
+    <div id="rpmWrap"><b id="rpm"></b></div>
+    <div id="speed"><b id="spd">0</b><span>KM/H</span></div>
+  </div>
+  <canvas id="mini" width="170" height="170"></canvas>
+  <div id="lights"><i></i><i></i><i></i><i></i><i></i></div>
+</div>
+
+<div id="result" class="hidden">
+  <div class="box">
+    <h2>RACE COMPLETE</h2>
+    <table id="resBody"></table>
+    <p>ENTER → menu &nbsp;·&nbsp; L → race again</p>
+  </div>
+</div>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
