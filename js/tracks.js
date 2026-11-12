@@ -322,29 +322,57 @@ export function buildTrack(def, scene) {
   dummy.scale.set(1, 1, 1);
   cdIM.castShadow = true; group.add(trIM); group.add(cdIM);
 
-  // grandstands + pit building near start (kept clear of the racing line)
+  // grandstands + pit building near start. The circuit can fold back right
+  // beside the start straight, so these boxes must clear EVERY stretch of
+  // road, not just the straight they hang off (Tsukuba's return section used
+  // to run straight through the grandstand row). Search outward along the
+  // start perp until the footprints clear the whole corridor.
   const sm0 = samples[0]; const [p0x, p0z] = perp(sm0);
+  const sry = Math.atan2(sm0.tx, sm0.tz);
+  const boxClear = (x, z, w, d, ry) => {
+    const cu = Math.cos(ry), su = Math.sin(ry);
+    for (let i = 0; i < samples.length; i += 2) {
+      const dx = samples[i].x - x, dz = samples[i].z - z;
+      const lu = dx * cu + dz * su, lv = -dx * su + dz * cu;   // into box frame
+      const du = Math.max(0, Math.abs(lu) - w / 2), dv = Math.max(0, Math.abs(lv) - d / 2);
+      if (du * du + dv * dv < (hw + 0.8) * (hw + 0.8)) return false;
+    }
+    return true;
+  };
   const standMat = new THREE.MeshLambertMaterial({ color: 0xb8bcc2 });
   const standMat2 = new THREE.MeshLambertMaterial({ color: 0x8b939c });
+  const standAt = (k, off) => [sm0.x - p0x * (hw + off) + sm0.tx * (k * 28 - 28),
+                                sm0.z - p0z * (hw + off) + sm0.tz * (k * 28 - 28)];
+  const rowOff = [40, 52, 64, 78, 95].find(off =>
+    [0, 1, 2].every(k => { const [sx, sz] = standAt(k, off); return boxClear(sx, sz, 26, 12, sry); }));
   for (let k = 0; k < 3; k++) {
+    const off = rowOff !== undefined ? rowOff
+      : [40, 52, 64, 78, 95].find(o => { const [sx, sz] = standAt(k, o); return boxClear(sx, sz, 26, 12, sry); });
+    if (off === undefined) continue;              // nowhere clear — drop this stand
+    const [sx, sz] = standAt(k, off);
     const st = new THREE.Mesh(new THREE.BoxGeometry(26, 8, 12), k % 2 ? standMat : standMat2);
-    st.position.set(sm0.x - p0x * (hw + 38) + sm0.tx * (k * 28 - 28), 4, sm0.z - p0z * (hw + 38) + sm0.tz * (k * 28 - 28));
-    st.rotation.y = Math.atan2(sm0.tx, sm0.tz);
+    st.position.set(sx, 4, sz);
+    st.rotation.y = sry;
     group.add(st);
     const roof = new THREE.Mesh(new THREE.BoxGeometry(27, 0.8, 13), new THREE.MeshLambertMaterial({ color: 0x39404a }));
-    roof.position.set(st.position.x, 8.6, st.position.z); roof.rotation.y = st.rotation.y;
+    roof.position.set(sx, 8.6, sz); roof.rotation.y = sry;
     group.add(roof);
   }
-  const pit = new THREE.Mesh(new THREE.BoxGeometry(52, 7, 15), new THREE.MeshLambertMaterial({ color: 0x9aa3ad }));
-  pit.position.set(sm0.x + p0x * (hw + 36), 3.5, sm0.z + p0z * (hw + 36));
-  pit.rotation.y = Math.atan2(sm0.tx, sm0.tz);
-  group.add(pit);
-  const stripe = new THREE.Mesh(new THREE.BoxGeometry(52.4, 1.4, 15.4), new THREE.MeshLambertMaterial({ color: 0xc4302b }));
-  stripe.position.set(pit.position.x, 6.2, pit.position.z); stripe.rotation.y = pit.rotation.y;
-  group.add(stripe);
-  const upper = new THREE.Mesh(new THREE.BoxGeometry(44, 5, 13), new THREE.MeshLambertMaterial({ color: 0x5c6672 }));
-  upper.position.set(pit.position.x, 9.5, pit.position.z); upper.rotation.y = pit.rotation.y;
-  group.add(upper);
+  const pitOff = [36, 50, 64, 80, 96].find(off =>
+    boxClear(sm0.x + p0x * (hw + off), sm0.z + p0z * (hw + off), 52.4, 15.4, sry));
+  if (pitOff !== undefined) {
+    const pxp = sm0.x + p0x * (hw + pitOff), pzp = sm0.z + p0z * (hw + pitOff);
+    const pit = new THREE.Mesh(new THREE.BoxGeometry(52, 7, 15), new THREE.MeshLambertMaterial({ color: 0x9aa3ad }));
+    pit.position.set(pxp, 3.5, pzp);
+    pit.rotation.y = sry;
+    group.add(pit);
+    const stripe = new THREE.Mesh(new THREE.BoxGeometry(52.4, 1.4, 15.4), new THREE.MeshLambertMaterial({ color: 0xc4302b }));
+    stripe.position.set(pxp, 6.2, pzp); stripe.rotation.y = sry;
+    group.add(stripe);
+    const upper = new THREE.Mesh(new THREE.BoxGeometry(44, 5, 13), new THREE.MeshLambertMaterial({ color: 0x5c6672 }));
+    upper.position.set(pxp, 9.5, pzp); upper.rotation.y = sry;
+    group.add(upper);
+  }
 
   scene.add(group);
 
