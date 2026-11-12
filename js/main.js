@@ -44,6 +44,7 @@ const S = {
   keys: {}, raceTime: 0, countT: 0,
   lapStart: 0, lapTimes: [], bestLap: null, lapsDone: 0, halfDone: false, lastSW: 0,
   smoke: [], smokeIdx: 0,
+  lightsOff: false, rank: 1, vf: 0,
   started: false,
 };
 window.__game = S;
@@ -114,17 +115,30 @@ function buildMenu() {
 }
 
 // ---------- race setup ----------
+// Releases GPU buffers: three.js only frees a geometry/material on dispose(),
+// not when it leaves the scene, so every restart would otherwise upload a whole
+// new track (+ ~350 meshes) on top of the old one.
+function disposeGroup(g) {
+  if (!g) return;
+  g.traverse(o => {
+    if (o.geometry) o.geometry.dispose();
+    const mats = o.material ? (Array.isArray(o.material) ? o.material : [o.material]) : [];
+    mats.forEach(m => m.dispose());
+  });
+}
+
 function clearRace() {
-  if (S.trackGroup) scene.remove(S.trackGroup);
-  [S.playerView, ...S.ai.map(a => a.view)].forEach(v => v && scene.remove(v));
-  S.smoke.forEach(s => scene.remove(s.mesh));
+  if (S.trackGroup) { scene.remove(S.trackGroup); disposeGroup(S.trackGroup); }
+  [S.playerView, ...S.ai.map(a => a.view)].forEach(v => {
+    if (v) { scene.remove(v); disposeGroup(v); }
+  });
+  S.smoke.forEach(s => { scene.remove(s.mesh); s.mesh.geometry.dispose(); s.mesh.material.dispose(); });
   S.smoke = [];
-  if (S.aiView) S.aiView.forEach(v => scene.remove(v));
   document.getElementById('result').classList.add('hidden');
   document.getElementById('hud').classList.add('hidden');
 }
 
-let miniMapPts = null;
+let miniMapPts = null, MINI = { mn: [0, 0] };
 function startRace() {
   clearRace();
   S.carIdx = selCar; S.trackIdx = selTrack;
@@ -174,6 +188,7 @@ function startRace() {
   const mnx = Math.min(...xs), mxx = Math.max(...xs), mnz = Math.min(...zs), mxz = Math.max(...zs);
   miniMapPts = S.track.samples.filter((_, i) => i % 4 === 0)
     .map(s => [(s.x - mnx), (s.z - mnz), mxx - mnx, mxz - mnz]);
+  MINI = { mn: [mnx, mnz] };            // car dots are normalised against the same bounds
 
   S.raceTime = 0; S.lapStart = 0; S.lapTimes = []; S.bestLap = null;
   S.lapsDone = 0; S.halfDone = false;
@@ -194,7 +209,7 @@ function toMenu() {
 }
 
 function respawn() {
-  const n = S.track.nearest(S.player.x, S.player.z);
+  const n = S.track.nearest(S.player.x, S.player.z, S.player.y);
   S.player.snapTo(n, 0.2);
 }
 
@@ -244,7 +259,7 @@ function frame() {
     if (S.mode === 'race' && S.raceTime > 1.2 && !S.lightsOff) { S.lightsOff = true; setLights(0, false); document.getElementById('lights').style.opacity = '0'; }
     if (S.mode === 'count') { S.lightsOff = false; document.getElementById('lights').style.opacity = '1'; }
     const canDrive = S.mode === 'race';
-    const near = S.track.nearest(S.player.x, S.player.z);
+    const near = S.track.nearest(S.player.x, S.player.z, S.player.y);
     const vf = S.player.update(dt, canDrive ? inp() : {}, near);
     S.vf = vf;
     if (S.mode === 'count') {
@@ -287,7 +302,9 @@ function frame() {
       S.lapTimes.push(lapT);
       if (S.bestLap == null || lapT < S.bestLap) S.bestLap = lapT;
       S.lapsDone++;
-      if (S.lapsDone >= S.track.def.laps) finishRace();
+      // rank must be recomputed with the crossing counted, or the results screen
+      // reports the position from the previous frame
+      if (S.lapsDone >= S.track.def.laps) { computeRank(S.lapsDone * L + w); finishRace(); }
       else document.getElementById('lapsTag').textContent = `LAP ${S.lapsDone + 1}/${S.track.def.laps}`;
     }
     S.lastSW = w;
@@ -295,16 +312,14 @@ function frame() {
     // AI
     const playerTotal = S.lapsDone * L + w;
     S.ai.forEach(a => {
-      if (canDrive) a.update(dt, playerTotal);
+      if (canDrive) a.update(dt, playerTotal, S.ai);
       a.view.position.set(a.x, a.y, a.z);
       a.view.rotation.set(0, a.a, 0);
       if (a.wheels) a.wheels.forEach(wh => { wh.rotation.x += a.v / 0.33 * dt; });
     });
 
     // standings
-    const tot = [{ t: playerTotal, p: true }, ...S.ai.map(a => ({ t: a.laps * L + a.s, p: false }))];
-    tot.sort((x, y) => y.t - x.t);
-    S.rank = tot.findIndex(e => e.p) + 1;
+    computeRank(playerTotal);
 
     // camera
     const spd = P.speed();
@@ -320,18 +335,23 @@ function frame() {
     // HUD
     const kmh = Math.round(spd * 3.6);
     document.getElementById('spd').textContent = kmh;
-    const thr = [0, 11, 22, 33, 46, 58];
+    // Gear breakpoints in m/s. The last one is the redline and must sit above the
+    // fastest car's top speed: with no top breakpoint the top-gear fraction divided
+    // by zero-ish (0 || 1), so above ~209 km/h the tach bar ran to ~900% wide and
+    // the engine oscillator jumped to ~2 kHz.
+    const thr = [0, 11, 22, 33, 46, 58, P.st.topSpeed + 2];
     let gi = 0; while (gi < 5 && spd > thr[gi + 1]) gi++;
     if (spd < 0.4) gi = 0;
     const gear = spd < 0.4 ? 'N' : String(gi + 1);
     document.getElementById('gear').textContent = gear;
-    document.getElementById('rpm').style.width = `${((spd - thr[gi]) / (thr[Math.min(5, gi + 1)] - thr[gi] || 1)) * 92 + 6}%`;
-    document.getElementById('pos').textContent = `${S.rank}/4`;
+    const load = Math.max(0, Math.min(1, (spd - thr[gi]) / (thr[gi + 1] - thr[gi])));
+    document.getElementById('rpm').style.width = `${load * 92 + 6}%`;
+    document.getElementById('pos').textContent = `${S.rank}/${S.ai.length + 1}`;
     const tm = S.mode === 'race' ? S.raceTime : 0;
     document.getElementById('time').textContent = fmt(tm);
     document.getElementById('best').textContent = S.bestLap ? fmt(S.bestLap) : '--:--.---';
     if (AC && !muted && S.mode === 'race') {
-      const rpm = 1200 + ((spd - thr[gi]) / (thr[Math.min(5, gi + 1)] - thr[gi] || 1)) * 6800;
+      const rpm = 1200 + load * 6800;
       const fr = 42 + rpm / 55 * (1 + Math.min(0.35, spd / 200));
       engOsc.frequency.value = fr; engOsc2.frequency.value = fr * 1.994;
       engGain.gain.value = Math.min(0.10, 0.035 + spd / 900);
@@ -340,9 +360,20 @@ function frame() {
     drawMini(P, w);
   }
 
+  // the race block above is the only writer of the engine gain, so silence the
+  // engine whenever we are not in it, otherwise the last value drones forever
+  if (AC && (S.mode === 'done' || S.mode === 'menu') && engGain.gain.value !== 0) engGain.gain.value = 0;
+
   renderer.render(scene, cam);
 }
 const fmt = t => `${String(Math.floor(t / 60)).padStart(2, '0')}:${(t % 60).toFixed(3).padStart(6, '0')}`;
+
+function computeRank(playerTotal) {
+  const L = S.track.length;
+  const tot = [{ t: playerTotal, p: true }, ...S.ai.map(a => ({ t: a.laps * L + a.s, p: false }))];
+  tot.sort((x, y) => y.t - x.t);
+  S.rank = tot.findIndex(e => e.p) + 1;
+}
 
 function finishRace() {
   S.mode = 'done';
@@ -373,16 +404,7 @@ function drawMini(P, w) {
     miniG.beginPath(); miniG.arc(ax, az, 3.4, 0, 7); miniG.fill();
   });
 }
-let MINI = { mn: [0, 0] };
-// capture mins when building minimap
-const _startRace = startRace;
-startRace = function () {
-  _startRace();
-  const xs = S.track.samples.map(s => s.x), zs = S.track.samples.map(s => s.z);
-  MINI = { mn: [Math.min(...xs), Math.min(...zs)] };
-};
-
 buildMenu();
 frame();
 
-window.__dbg = { get cam() { return cam; }, get scene() { return scene; } };
+window.__dbg = { get cam() { return cam; }, get scene() { return scene; }, get renderer() { return renderer; } };

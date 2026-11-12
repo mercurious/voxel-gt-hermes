@@ -56,7 +56,7 @@ export function buildVoxelCar(car) {
   b.position.y = q(m.hgt * 0.32); g.add(b);
 
   // cabin / greenhouse (offset rear for 911, mid for others)
-  const cabZ = m.id === 'p911' || car.id === 'p911' ? m.len * 0.10 : (car.id === 'gtr' ? -m.len * 0.02 : -m.len * 0.04);
+  const cabZ = car.id === 'p911' ? m.len * 0.10 : (car.id === 'gtr' ? -m.len * 0.02 : -m.len * 0.04);
   let c = M(new THREE.BoxGeometry(q(m.wid * 0.86), q(m.cab), q(m.len * 0.42)), body);
   c.position.set(0, q(m.hgt * 0.62 + m.cab * 0.45), cabZ); g.add(c);
   let gl = M(new THREE.BoxGeometry(q(m.wid * 0.90), q(m.cab * 0.72), q(m.len * 0.36)), glass);

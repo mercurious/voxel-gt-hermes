@@ -25,8 +25,10 @@ export const TRACKS = [
       [470,680],[420,660],[360,640],[300,630],[230,615],[170,570],[120,500],
       [90,410],[100,310],[160,240],[250,230],[310,250],[300,180],[230,120],[140,110],
     ],
-    // elevation in meters applied to samples s in [sA,sB] (the bridge over the S curves)
-    bridge: { sAFrac: 0.485, sBFrac: 0.585, h: 4.2 },
+    // elevation in meters applied to samples s in [sA,sB] — the deck must straddle
+    // the real self-crossing of the layout (plan distance between the two branches
+    // is only ~3.5 m there), otherwise the ribbons intersect at ground level
+    bridge: { sAFrac: 0.56, sBFrac: 0.74, h: 6.2 },
   },
   {
     id: 'laguna', name: "WeatherTech Raceway Laguna Seca", loc: 'Monterey, USA · 3.602 km · The Corkscrew',
@@ -112,8 +114,30 @@ export function buildTrack(def, scene) {
   };
   samples.forEach(sm => { sm.y = eAt(sm); });
 
-  // bridge piers under elevated overlap
-  const isBridge = sm => sm.y > 1.2;
+  // A bridge deck is only where the track declares one: height alone is not
+  // enough, because elevation-driven tracks (Laguna Seca) run 1-12 m above the
+  // plain along hillsides and would grow pier columns out of every embankment.
+  const isBridge = sm => !!def.bridge && sm.y > 1.2;
+
+  // Distance from each elevated sample to the nearest part of the track that is
+  // not the same stretch. Used to keep piers off the road below and to cut the
+  // embankment away where the deck flies over it.
+  const distOther = new Float64Array(samples.length).fill(Infinity);
+  if (def.bridge) {
+    for (let i = 0; i < samples.length; i++) {
+      const a = samples[i];
+      if (!isBridge(a)) continue;
+      let dmin = Infinity;
+      for (let j = 0; j < samples.length; j += 2) {
+        const b = samples[j];
+        let ds = Math.abs(a.s - b.s); ds = Math.min(ds, length - ds);
+        if (ds < 60) continue;               // same stretch of ribbon
+        const dx = b.x - a.x, dz = b.z - a.z, d = Math.sqrt(dx * dx + dz * dz);
+        if (d < dmin) { dmin = d; if (d < 1) break; }
+      }
+      distOther[i] = dmin;
+    }
+  }
 
   // ---- road ribbon (top surface) ----
   const pos = [], uv = [], idx = [];
@@ -140,7 +164,7 @@ export function buildTrack(def, scene) {
   const dashMat = new THREE.MeshBasicMaterial({ color: 0xcfd3d8 });
   for (let i = 0; i < samples.length; i += 6) {
     const sm = samples[i];
-    if (sm.y > 1.2 && i % 12) continue;
+    if (isBridge(sm) && i % 12) continue;   // dashed centre line only on the ground, not on a deck
     const d = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.05, 2.2), dashMat);
     d.position.set(sm.x, sm.y + 0.05, sm.z);
     d.rotation.y = Math.atan2(sm.tx, sm.tz);
@@ -219,10 +243,11 @@ export function buildTrack(def, scene) {
     group.add(curIM);
   }
 
-  // bridge piers
+  // bridge piers (skip the span over the road below: a column there would stand
+  // in the middle of the live racing surface)
   for (let i = 0; i < samples.length; i += 8) {
     const sm = samples[i];
-    if (!isBridge(sm)) continue;
+    if (!isBridge(sm) || distOther[i] < hw + 6) continue;
     const p = new THREE.Mesh(new THREE.BoxGeometry(1.3, sm.y, 1.0), new THREE.MeshLambertMaterial({ color: 0x8a8f96 }));
     p.position.set(sm.x, sm.y / 2, sm.z);
     group.add(p);
@@ -237,7 +262,8 @@ export function buildTrack(def, scene) {
   for (const b of bands) {
     const pos = [], idx = [];
     for (let i = 0; i <= samples.length; i++) {
-      const sm = samples[Math.min(i, samples.length - 1)];
+      // wrap (not clamp) so the embankment closes over the start/finish line
+      const sm = samples[i % samples.length];
       const [nx, nz] = perp(sm);
       const yA = Math.max(-0.15, b.y0(sm)), yB = Math.max(-0.18, b.y1(sm));
       for (const sgn of [-1, 1]) {
@@ -248,7 +274,10 @@ export function buildTrack(def, scene) {
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
     g.computeVertexNormals();
+    // don't fill the embankment in where it would bury a road the deck crosses over
+    const cut = b.d1 + hw;
     for (let i = 0; i < samples.length; i++) {
+      if (distOther[i] < cut || distOther[(i + 1) % samples.length] < cut) continue;
       const a = i * 4, b2 = a + 4;
       for (let k = 0; k < 2; k++) {
         idx.push(a + k * 2, b2 + k * 2, a + k * 2 + 1, a + k * 2 + 1, b2 + k * 2, b2 + k * 2 + 1);
@@ -320,16 +349,26 @@ export function buildTrack(def, scene) {
   scene.add(group);
 
   // ---- runtime API ----
-  function nearest(x, z) {
+  // Height is part of the search: at a self-crossing (Suzuka) the deck passes
+  // 6 m above the other branch only ~3.5 m away in plan, so plan distance alone
+  // would snap a car on the lower road onto the deck (and vice versa at the deck
+  // edge) — which also throws off the lap counter. A car always rides its own
+  // surface, so a vertical mismatch means "different road" and is weighted hard.
+  const YW = 6;
+  function nearest(x, z, y = null) {
+    const dy = i => (y == null ? 0 : (samples[i].y - y) * YW);
     let best = 0, bd = 1e18;
     for (let i = 0; i < samples.length; i += 2) {
-      const dx = samples[i].x - x, dz = samples[i].z - z, d = dx * dx + dz * dz;
+      const dx = samples[i].x - x, dz = samples[i].z - z, dyy = dy(i);
+      const d = dx * dx + dz * dz + dyy * dyy;
       if (d < bd) { bd = d; best = i; }
     }
-    let bi = best, bbi = best; let bbd = bd;
+    let bbi = best; let bbd = bd;
     for (let i = best - 4; i <= best + 4; i++) {
-      const sm = samples[((i % samples.length) + samples.length) % samples.length];
-      const dx = sm.x - x, dz = sm.z - z, d = dx * dx + dz * dz;
+      const j = ((i % samples.length) + samples.length) % samples.length;
+      const sm = samples[j];
+      const dx = sm.x - x, dz = sm.z - z, dyy = y == null ? 0 : (sm.y - y) * YW;
+      const d = dx * dx + dz * dz + dyy * dyy;
       if (d < bbd) { bbd = d; bbi = i; }
     }
     const sm = samples[((bbi % samples.length) + samples.length) % samples.length];

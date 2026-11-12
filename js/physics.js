@@ -58,8 +58,9 @@ export class Vehicle {
     // lateral scrub (grip)
     const grip = st.grip * gripMul * (inp.hand ? 0.30 : 1);
     vl = Math.sign(vl) * Math.max(0, Math.abs(vl) - grip * dt);
-    // grass shoves the car around a bit
-    if (!this.onRoad) vl += (Math.random() - 0.5) * 0.3;
+    // grass shoves the car around a bit (18 m/s^2 of kick, dt-scaled so the
+    // behaviour is identical at 30 and 144 fps)
+    if (!this.onRoad) vl += (Math.random() - 0.5) * 18 * dt;
 
     this.vx = f.x * vf + lx * vl;
     this.vz = f.z * vf + lz * vl;
@@ -87,7 +88,10 @@ export class AICar {
     this.skill = skill;
     this.s = 0; this.v = 0; this.laps = 0;
     this.x = 0; this.z = 0; this.y = 0; this.a = 0;
-    this.line = (Math.random() - 0.5) * 2.4; // personal racing-line bias
+    // personal racing-line bias: a spread wider than the car (1.8 m) so rivals
+    // never end up occupying the same lane and driving through each other
+    this.line = (Math.random() - 0.5) * 4.4;   // spread wider than the 1.8 m car width
+    this.lat = this.line;
   }
   place(s) {
     this.s = s;
@@ -96,7 +100,10 @@ export class AICar {
     this.x = p.x + px * this.line; this.z = p.z + pz * this.line;
     this.y = p.y; this.a = Math.atan2(p.tx, p.tz);
   }
-  update(dt, playerTotal) {
+  // `others` is the rest of the field: rivals have no collision model of their
+  // own, so without this they happily drive through each other when two of them
+  // end up in the same lane.
+  update(dt, playerTotal, others = []) {
     const p = this.track.pointAtS(this.s);
     const r = 1 / Math.max(0.0012, p.curv);
     const vLat = Math.sqrt(this.car.stats.grip * this.skill * r);
@@ -105,12 +112,22 @@ export class AICar {
     const myTotal = this.laps * this.track.length + this.s;
     vT *= Math.max(0.93, Math.min(1.07, 1 + (playerTotal - myTotal) / 900));
     this.v += Math.max(-6, Math.min(5.5, vT - this.v)) * dt;
+    // queue up behind a rival that is close ahead in our lane instead of overlapping it
+    for (const o of others) {
+      if (o === this) continue;
+      const half = this.track.length / 2;
+      let d = o.s - this.s;
+      if (d > half) d -= this.track.length; else if (d < -half) d += this.track.length;
+      if (d <= 0.5 || d > 10) continue;
+      if (Math.abs(o.lat - this.lat) < 2.2) this.v = Math.min(this.v, o.v * 0.985);
+    }
     const prev = this.s;
     this.s += this.v * dt;
     if (this.s > this.track.length) { this.s -= this.track.length; this.laps++; }
     const q = this.track.pointAtS(this.s);
     // lateral: apex inside of corner
     const target = -Math.sign(q.signed) * Math.min(this.track.halfWidth - 2.6, q.curv * 900) + this.line * 0.6;
+    this.lat = target;
     const px = -q.tz, pz = q.tx;
     const cx = q.x + px * target, cz = q.z + pz * target;
     this.x += (cx - this.x) * Math.min(1, 8 * dt);
