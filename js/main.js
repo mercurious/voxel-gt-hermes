@@ -269,6 +269,42 @@ function frame() {
     }
     if (S.keys.KeyR && S.mode === 'count') S.player.snapTo(near, 0);
 
+    // barrier walls: the red/white barrier line is solid — cars bounce off it
+    // and cannot leave the track. The corridor is enforced in the track frame
+    // (lat vs the barrier inner face, hw*1.06 − 0.175 − car half-width 0.9),
+    // which keeps lap-s continuous and is safe at Suzuka's self-crossing
+    // because `near` is height-weighted — the wall follows the branch you're on.
+    {
+      const PB = S.player, sm = near.sm;
+      const px = -sm.tz, pz = sm.tx;
+      const wallLat = S.track.halfWidth * 1.06 - 0.18 - 0.9;
+      const bLat = (PB.x - sm.x) * px + (PB.z - sm.z) * pz;
+      const over = Math.abs(bLat) - wallLat + 0.02;  // 2 cm contact skin
+      if (over > 0) {
+        const pen = Math.max(0, over - 0.02);        // true penetration for fx
+        const sgn = Math.sign(bLat);
+        if (pen > 0) { PB.x -= px * sgn * pen; PB.z -= pz * sgn * pen; }
+        const vLat = PB.vx * px + PB.vz * pz, vTan = PB.vx * sm.tx + PB.vz * sm.tz;
+        const vLat2 = vLat * sgn > 0 ? -vLat * 0.35 : vLat;   // restitution 0.35
+        const vTan2 = vTan * Math.max(0, 1 - (0.15 + 12 * pen) * dt); // scrape vs hit force
+        PB.vx = px * vLat2 + sm.tx * vTan2;
+        PB.vz = pz * vLat2 + sm.tz * vTan2;
+        PB.slip *= 0.4;
+        // ride the wall, don't pin nose-first: ease the heading toward the
+        // corridor tangent so throttle gets converted into slide, not impact
+        const ta = Math.atan2(sm.tx, sm.tz) + (vTan < 0 ? Math.PI : 0);
+        let da = ta - PB.a;
+        while (da > Math.PI) da -= 2 * Math.PI;
+        while (da < -Math.PI) da += 2 * Math.PI;
+        PB.a += da * Math.min(1, 8 * dt);
+        if (over > 0.05 && Math.abs(vLat) > 6) {              // impact puff
+          const s0 = S.smoke[S.smokeIdx = (S.smokeIdx + 1) % S.smoke.length];
+          s0.mesh.position.set(PB.x + px * sgn * 0.9, PB.y + 0.4, PB.z + pz * sgn * 0.9);
+          s0.mesh.material.opacity = 0.5; s0.life = 0.55;
+        }
+      }
+    }
+
     // model pose
     const P = S.player;
     S.playerView.position.set(P.x, P.y, P.z);
