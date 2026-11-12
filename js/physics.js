@@ -92,6 +92,7 @@ export class AICar {
     // never end up occupying the same lane and driving through each other
     this.line = (Math.random() - 0.5) * 4.4;   // spread wider than the 1.8 m car width
     this.lat = this.line;
+    this.dodgeSide = 0;   // latched overtake commitment: -1/0/+1
   }
   place(s) {
     this.s = s;
@@ -112,14 +113,21 @@ export class AICar {
     const myTotal = this.laps * this.track.length + this.s;
     vT *= Math.max(0.93, Math.min(1.07, 1 + (playerTotal - myTotal) / 900));
     this.v += Math.max(-6, Math.min(5.5, vT - this.v)) * dt;
-    // queue up behind a rival that is close ahead in our lane instead of overlapping it
+    // queue up behind anyone close ahead in our lane (rival or the player, both
+    // arrive through `others` with x/z) instead of overlapping it. Gates use the
+    // REAL world lateral offset — gating on this.lat (the lane command) makes a
+    // dodging car oscillate: the command clears the band a frame before the
+    // smoothed car body has actually moved sideways, so it re-queues forever.
+    const half = this.track.length / 2;
+    const px0 = -p.tz, pz0 = p.tx;
+    const myLat = (this.x - p.x) * px0 + (this.z - p.z) * pz0;
+    const latOf = o => (o.x - p.x) * px0 + (o.z - p.z) * pz0;
     for (const o of others) {
       if (o === this) continue;
-      const half = this.track.length / 2;
       let d = o.s - this.s;
       if (d > half) d -= this.track.length; else if (d < -half) d += this.track.length;
       if (d <= 0.5 || d > 10) continue;
-      if (Math.abs(o.lat - this.lat) < 2.2) this.v = Math.min(this.v, o.v * 0.985);
+      if (Math.abs(latOf(o) - myLat) < 2.2) this.v = Math.min(this.v, o.v * 0.985);
     }
     const prev = this.s;
     this.s += this.v * dt;
@@ -127,9 +135,46 @@ export class AICar {
     const q = this.track.pointAtS(this.s);
     // lateral: apex inside of corner
     const target = -Math.sign(q.signed) * Math.min(this.track.halfWidth - 2.6, q.curv * 900) + this.line * 0.6;
-    this.lat = target;
+    // dodge: a slower car ahead (or beside) triggers a LATCHED overtake
+    // commitment. Two lessons: (1) a proportional dodge cancels itself at the
+    // band edge, so the car dithers forever; (2) the latch must persist while
+    // ANY slow car sits in the ahead-window — releasing it the moment the body
+    // momentarily clears the band makes the side oscillate faster than the
+    // smoothed car body can ever commit. Once latched, hold a full 3.4 m
+    // offset (over the 2.2 m queue-release threshold) until the pass completes
+    // and the blocker falls behind.
     const px = -q.tz, pz = q.tx;
-    const cx = q.x + px * target, cz = q.z + pz * target;
+    const myLat2 = (this.x - q.x) * px + (this.z - q.z) * pz;
+    let relevant = false, pick = 0;
+    const lats = [];
+    for (const o of others) {
+      if (o === this) continue;
+      let d = o.s - this.s;
+      if (d > half) d -= this.track.length; else if (d < -half) d += this.track.length;
+      if (d < -10 || d > 10) continue;
+      const oLat = (o.x - q.x) * px + (o.z - q.z) * pz;
+      lats.push(oLat);
+      if (d < -0.5 || o.v >= vT - 0.5) continue;      // blocking: ahead & slower
+                                                      // (current v is already queue-
+                                                      // clamped, so compare to vT)
+      relevant = true;
+      if (!pick && Math.abs(myLat2 - oLat) < 2.3)
+        pick = (myLat2 !== oLat ? Math.sign(myLat2 - oLat) : (this.line >= 0 ? 1 : -1));
+    }
+    if (!relevant) this.dodgeSide = 0;
+    else if (!this.dodgeSide) {
+      // commit to a side — but if another car already occupies the destination
+      // lane, take the other one (two rivals picking into each other's path is
+      // how they end up crossing and driving through one another)
+      let side = pick || (this.line >= 0 ? 1 : -1);
+      const dest = myLat2 + side * 3.4;
+      for (const oLat of lats) if (Math.abs(oLat - dest) < 2.4) { side = -side; break; }
+      this.dodgeSide = side;
+    }
+    const lim = this.track.halfWidth - 1.8;
+    const off = this.dodgeSide ? this.dodgeSide * 3.4 : 0;
+    this.lat = Math.max(-lim, Math.min(lim, target + off));
+    const cx = q.x + px * this.lat, cz = q.z + pz * this.lat;
     this.x += (cx - this.x) * Math.min(1, 8 * dt);
     this.z += (cz - this.z) * Math.min(1, 8 * dt);
     this.y = q.y;

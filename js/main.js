@@ -309,10 +309,60 @@ function frame() {
     }
     S.lastSW = w;
 
-    // AI
+    // AI — the player rides along in `others` as a proxy car so rivals also
+    // queue behind and dodge around them (see AICar.update)
     const playerTotal = S.lapsDone * L + w;
+    if (canDrive) {
+      const sm = near.sm;
+      const proxy = {
+        s: w,
+        x: S.player.x, z: S.player.z,
+        lat: (S.player.x - sm.x) * -sm.tz + (S.player.z - sm.z) * sm.tx,
+        v: Math.max(0, vf),
+      };
+      const field = [...S.ai, proxy];
+      S.ai.forEach(a => a.update(dt, playerTotal, field));
+
+      // physical contact, player vs rival. Contact test in the rival's frame:
+      // du past 4.4 m = bumpers touching, dw past 3.4 m = doors touching.
+      // Elevation guard: at Suzuka's deck the branches pass 4 m apart in plan
+      // and 6 m in height — they must not collide across levels.
+      for (const a of S.ai) {
+        if (Math.abs(S.player.y - a.y) > 3) continue;
+        const dx = S.player.x - a.x, dz = S.player.z - a.z;
+        const hx = Math.sin(a.a), hz = Math.cos(a.a);
+        const e = Math.hypot((dx * hx + dz * hz) / 4.4, (dx * -hz + dz * hx) / 3.4);
+        if (e >= 1) continue;                                   // e=1 → bumpers kissing
+        const d = Math.max(0.3, Math.hypot(dx, dz));
+        const nx = dx / d, nz = dz / d, pen = (1 - e) * 3.8;
+        S.player.x += nx * pen * 0.55; S.player.z += nz * pen * 0.55;
+        a.x -= nx * pen * 0.45; a.z -= nz * pen * 0.45;         // line-smoothing pulls it back
+        const vN = S.player.vx * nx + S.player.vz * nz;
+        if (vN < 0) { const j = -1.35 * vN; S.player.vx += j * nx; S.player.vz += j * nz; }
+        a.v = Math.max(0, a.v - 0.8);
+        if (pen > 1) {
+          const s0 = S.smoke[S.smokeIdx = (S.smokeIdx + 1) % S.smoke.length];
+          s0.mesh.position.set((S.player.x + a.x) / 2, S.player.y + 0.5, (S.player.z + a.z) / 2);
+          s0.mesh.material.opacity = 0.42; s0.life = 0.5;
+        }
+      }
+      // positional floor for rival-vs-rival too: lateral steering resolves most
+      // contacts, but multi-car dodges can cross paths mid-maneuver — a gentle
+      // separation guarantees no rival ever drives through another
+      for (let i = 0; i < S.ai.length; i++) for (let j = i + 1; j < S.ai.length; j++) {
+        const a = S.ai[i], b = S.ai[j];
+        if (Math.abs(a.y - b.y) > 3) continue;
+        const dx = a.x - b.x, dz = a.z - b.z;
+        const hx = Math.sin(b.a), hz = Math.cos(b.a);
+        const e = Math.hypot((dx * hx + dz * hz) / 4.4, (dx * -hz + dz * hx) / 3.4);
+        if (e >= 1) continue;
+        const d = Math.max(0.3, Math.hypot(dx, dz));
+        const nx = dx / d, nz = dz / d, pen = (1 - e) * 1.9;
+        a.x += nx * pen * 0.5; a.z += nz * pen * 0.5;
+        b.x -= nx * pen * 0.5; b.z -= nz * pen * 0.5;
+      }
+    }
     S.ai.forEach(a => {
-      if (canDrive) a.update(dt, playerTotal, S.ai);
       a.view.position.set(a.x, a.y, a.z);
       a.view.rotation.set(0, a.a, 0);
       if (a.wheels) a.wheels.forEach(wh => { wh.rotation.x += a.v / 0.33 * dt; });
