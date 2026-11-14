@@ -81,6 +81,15 @@ export class Vehicle {
   }
 }
 
+// m/s^2 the AI are willing to brake with, and how far ahead of the car their
+// speed target looks. Racing cars brake 2-3 g; 9 m/s^2 is what a smoothed
+// arcade model can hold without the car lurching.
+const AI_BRAKE = 9;
+// Distances the speed target watches ahead. The short ones matter: with nothing
+// inside 25 m the last stretch of braking road is unconstrained, and rivals still
+// arrived at a hairpin 2.2x over their grip limit.
+const LOOKAHEAD = [12, 18, 25, 45, 80, 130, 200];
+
 export class AICar {
   constructor(car, track, skill) {
     this.car = car;
@@ -106,13 +115,27 @@ export class AICar {
   // end up in the same lane.
   update(dt, playerTotal, others = []) {
     const p = this.track.pointAtS(this.s);
-    const r = 1 / Math.max(0.0012, p.curv);
-    const vLat = Math.sqrt(this.car.stats.grip * this.skill * r);
-    let vT = Math.min(this.car.stats.topSpeed * this.skill, vLat);
+    const grip = this.car.stats.grip * this.skill;
+    // Corner speed off the smoothed curvature, plus the width allowance: a car can
+    // use the whole of a 14-17 m wide road, so the line it takes through a kink is
+    // roughly half a track width wider than the centreline itself.
+    const rEff = 1 / Math.max(0.0012, p.curvS ?? p.curv) + this.track.halfWidth;
+    let vT = Math.min(this.car.stats.topSpeed * this.skill, Math.sqrt(grip * rEff));
+    // Braking curve: for every tighter point ahead, the most speed that can still
+    // be scrubbed off before reaching it (v^2 = vLim^2 + 2*a*d). Reading only the
+    // curvature under the car left the target dropping for a single 2.4 m sample,
+    // which the -6 m/s^2 ramp could never follow — rivals took a Tsukuba hairpin
+    // at 123 km/h, seven times their own grip limit.
+    for (const dA of LOOKAHEAD) {
+      const q = this.track.pointAtS(this.s + dA);
+      const lim2 = grip * (1 / Math.max(0.0012, q.curvS ?? q.curv) + this.track.halfWidth);
+      const allow = lim2 + 2 * AI_BRAKE * dA;
+      if (allow < vT * vT) vT = Math.sqrt(allow);
+    }
     // rubber band
     const myTotal = this.laps * this.track.length + this.s;
     vT *= Math.max(0.93, Math.min(1.07, 1 + (playerTotal - myTotal) / 900));
-    this.v += Math.max(-6, Math.min(5.5, vT - this.v)) * dt;
+    this.v += Math.max(-AI_BRAKE, Math.min(5.5, vT - this.v)) * dt;
     // queue up behind anyone close ahead in our lane (rival or the player, both
     // arrive through `others` with x/z) instead of overlapping it. Gates use the
     // REAL world lateral offset — gating on this.lat (the lane command) makes a
@@ -126,15 +149,18 @@ export class AICar {
       if (o === this) continue;
       let d = o.s - this.s;
       if (d > half) d -= this.track.length; else if (d < -half) d += this.track.length;
-      if (d <= 0.5 || d > 10) continue;
-      if (Math.abs(latOf(o) - myLat) < 2.2) this.v = Math.min(this.v, o.v * 0.985);
+      if (d < 0.2 || d > 12) continue;
+      if (Math.abs(latOf(o) - myLat) < 2.2) this.v = Math.min(this.v, o.v * (d < 2.5 ? 0.9 : 0.985));
     }
     const prev = this.s;
     this.s += this.v * dt;
     if (this.s > this.track.length) { this.s -= this.track.length; this.laps++; }
     const q = this.track.pointAtS(this.s);
-    // lateral: apex inside of corner
-    const target = -Math.sign(q.signed) * Math.min(this.track.halfWidth - 2.6, q.curv * 900) + this.line * 0.6;
+    // lateral: apex the INSIDE of the corner. signed>0 puts the centre of
+    // curvature on the +perp side, and lat is measured along that same perp, so
+    // the inside offset is +sign(signed) — the old minus sign drove every rival
+    // wide on the outside of every corner, exactly the line a rival should NOT take.
+    const target = Math.sign(q.signedS) * Math.min(this.track.halfWidth - 2.6, (q.curvS ?? q.curv) * 900) + this.line * 0.6;
     // dodge: a slower car ahead (or beside) triggers a LATCHED overtake
     // commitment. Two lessons: (1) a proportional dodge cancels itself at the
     // band edge, so the car dithers forever; (2) the latch must persist while
@@ -173,7 +199,14 @@ export class AICar {
     }
     const lim = this.track.halfWidth - 1.8;
     const off = this.dodgeSide ? this.dodgeSide * 3.4 : 0;
-    this.lat = Math.max(-lim, Math.min(lim, target + off));
+    // The lane command is rate limited. Unbounded, it jumped several metres the
+    // instant the lights went out — a grid slot 3.2 m right of centre aiming at an
+    // apex 5.7 m left of it — so a rival slid sideways across the grid into
+    // whoever was parked alongside, and mid-race lane changes moved the body
+    // faster than any car can.
+    const want = Math.max(-lim, Math.min(lim, target + off));
+    const step = 6.5 * dt;
+    this.lat += Math.max(-step, Math.min(step, want - this.lat));
     const cx = q.x + px * this.lat, cz = q.z + pz * this.lat;
     this.x += (cx - this.x) * Math.min(1, 8 * dt);
     this.z += (cz - this.z) * Math.min(1, 8 * dt);

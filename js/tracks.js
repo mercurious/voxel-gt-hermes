@@ -6,7 +6,7 @@ import * as THREE from 'three';
 export const TRACKS = [
   {
     id: 'tsukuba', name: 'Tsukuba Circuit', loc: 'Ibaraki, Japan · 2.045 km · clockwise',
-    halfWidth: 7, laps: 3, scale: 1.06, elev: false,
+    halfWidth: 7, laps: 3, scale: 1.60, elev: false,   // scale set so the built lap measures the advertised 2.045 km
     // front straight -> 30A/30B high-speed kinks -> left hairpin -> S-curves -> chicane
     pts: [
       [0,185],[0,290],[0,470],[25,525],[75,560],[150,575],[225,565],
@@ -92,6 +92,22 @@ export function buildTrack(def, scene) {
     s += d;
   }
   const length = s;
+  // Raw heading deltas spike at digitised hairpins into 2-3 m radii, which nothing
+  // can drive. The asphalt is 14-17 m wide and a car bridges that centreline wiggle
+  // anyway, so the speed model needs the curvature of a line that is actually
+  // takeable: keep a width-scaled smoothed copy for the AI, leave `curv` alone for
+  // scenery (curb placement is tuned against the raw value).
+  const w2 = Math.max(3, Math.round(3 * hw / ds)) | 1;
+  const half2 = (w2 - 1) / 2;
+  for (let i = 0; i < samples.length; i++) {
+    let ac = 0, as = 0;
+    for (let k = -half2; k <= half2; k++) {
+      const j = ((i + k) % samples.length + samples.length) % samples.length;
+      ac += samples[j].curv; as += samples[j].signed;
+    }
+    samples[i].curvS = ac / w2;
+    samples[i].signedS = as / w2;
+  }
 
   // elevation profile: flat except declared bridge band / explicit elevs
   const eAt = (sm) => {
@@ -164,7 +180,9 @@ export function buildTrack(def, scene) {
   const dashMat = new THREE.MeshBasicMaterial({ color: 0xcfd3d8 });
   for (let i = 0; i < samples.length; i += 6) {
     const sm = samples[i];
-    if (isBridge(sm) && i % 12) continue;   // dashed centre line only on the ground, not on a deck
+    // i steps by 6, so i%12 is only ever 0 or 6: the old condition skipped the
+    // 6s and still painted half the dashes on the deck.
+    if (isBridge(sm)) continue;   // dashed centre line only on the ground, not on a deck
     const d = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.05, 2.2), dashMat);
     d.position.set(sm.x, sm.y + 0.05, sm.z);
     d.rotation.y = Math.atan2(sm.tx, sm.tz);
@@ -229,7 +247,10 @@ export function buildTrack(def, scene) {
     const sm = samples[i];
     if (sm.curv < 0.016) continue;
     const [px, pz] = perp(sm);
-    const sgn = sm.signed > 0 ? -1 : 1; // inner edge
+    // signed = dh/ds with h = atan2(tz,tx), so signed>0 bends the tangent toward
+    // perp=(-tz,tx): the corner's centre sits on the +perp side, and that side is
+    // the inner edge. The old ternary put every curb on the OUTER edge.
+    const sgn = sm.signed > 0 ? 1 : -1; // inner edge
     curbItems.push({ x: sm.x + px * hw * sgn * 0.88, y: sm.y + 0.05, z: sm.z + pz * hw * sgn * 0.88,
       ry: Math.atan2(sm.tx, sm.tz), alt: (i / 3) % 2 ? 1 : 0 });
   }
@@ -407,15 +428,20 @@ export function buildTrack(def, scene) {
   }
   function pointAtS(sv) {
     const t = ((sv % length) + length) % length;
+    // Last sample with s <= t. The lower-bound search this replaced returned the
+    // first sample with s >= t, so for any t between samples the interpolation
+    // below was dead code: every non-wrap call snapped up to ~2.4 m AHEAD of the
+    // requested s and stepped sample-to-sample instead of sliding along it.
     let lo = 0, hi = samples.length - 1;
-    while (lo < hi) { const mid = (lo + hi) >> 1; if (samples[mid].s < t) lo = mid + 1; else hi = mid; }
+    while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (samples[mid].s <= t) lo = mid; else hi = mid - 1; }
     const sm = samples[lo], nx = samples[(lo + 1) % samples.length];
     const seg = Math.max(0.1, nx.s > sm.s ? nx.s - sm.s : length - sm.s + nx.s);
     const w = Math.min(1, Math.max(0, (t - sm.s) / seg));
     const x = sm.x + (nx.x - sm.x) * w, z = sm.z + (nx.z - sm.z) * w, y = sm.y + (nx.y - sm.y) * w;
     const tx = sm.tx + (nx.tx - sm.tx) * w, tz = sm.tz + (nx.tz - sm.tz) * w;
     const tl = Math.hypot(tx, tz);
-    return { x, z, y, tx: tx / tl, tz: tz / tl, curv: sm.curv, signed: sm.signed };
+    return { x, z, y, tx: tx / tl, tz: tz / tl, curv: sm.curv, signed: sm.signed,
+      curvS: sm.curvS, signedS: sm.signedS };
   }
   return { def, group, samples, halfWidth: hw, length, nearest, pointAtS };
 }

@@ -52,6 +52,11 @@ window.__game = S;
 // ---------- input ----------
 addEventListener('keydown', e => {
   S.keys[e.code] = true;
+  // OS key repeat fires keydown ~30x/s while a key is held. Without this guard,
+  // holding R re-snapped the car to the centreline every repeat (speed collapsed
+  // to 0.2^n), and holding Enter/L restarted the race — and rebuilt the whole
+  // track — several times a second.
+  if (e.repeat) return;
   if (e.code === 'KeyR' && (S.mode === 'race')) respawn();
   if (e.code === 'Escape' && S.mode !== 'menu') toMenu();
   if (e.code === 'KeyL' && S.mode === 'done') startRace();
@@ -60,6 +65,11 @@ addEventListener('keydown', e => {
   if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) e.preventDefault();
 });
 addEventListener('keyup', e => { S.keys[e.code] = false; });
+// Alt-tab mid-corner and the keyup never arrives: the key stays "held" and the
+// car drives itself the moment the tab is back. Release everything on focus loss.
+const releaseKeys = () => { for (const k in S.keys) S.keys[k] = false; };
+addEventListener('blur', releaseKeys);
+document.addEventListener('visibilitychange', () => { if (document.hidden) releaseKeys(); });
 const inp = () => ({
   up: S.keys.KeyW || S.keys.ArrowUp,
   down: S.keys.KeyS || S.keys.ArrowDown,
@@ -122,6 +132,10 @@ function disposeGroup(g) {
   if (!g) return;
   g.traverse(o => {
     if (o.geometry) o.geometry.dispose();
+    // Barriers, curbs and trees are InstancedMeshes: instanceMatrix/instanceColor
+    // are not geometry attributes, so geometry.dispose() leaves those GPU buffers
+    // behind on every restart.
+    if (o.isInstancedMesh) o.dispose();
     const mats = o.material ? (Array.isArray(o.material) ? o.material : [o.material]) : [];
     mats.forEach(m => m.dispose());
   });
@@ -150,6 +164,11 @@ function startRace() {
   S.player = new Vehicle(car.stats);
   const pv = buildVoxelCar(car);
   S.playerView = pv.group; S.playerWheels = pv.wheels;
+  // Yaw first, then grade pitch, so the tilt is about the car's own lateral axis.
+  // With the default 'XYZ' order the pitch lands on the world X axis: measured on
+  // a +7% climb facing world +Z the nose pointed 4 degrees DOWN, and the same tilt
+  // turns into a roll when the car points along world X.
+  pv.group.rotation.order = 'YXZ';
   scene.add(S.playerView);
 
   const rivals = CARS.filter((c, i) => i !== S.carIdx).slice(0, 3);
@@ -158,6 +177,7 @@ function startRace() {
     const a = new AICar(c, S.track, skills[i]);
     const av = buildVoxelCar({ ...c, color: [0x2a2f36, 0x7a2a2a, 0x2a5a3a][i] });
     a.view = av.group; a.wheels = av.wheels;
+    a.view.rotation.order = 'YXZ';      // matches the player view; rivals pitch too
     scene.add(a.view);
     return a;
   });
@@ -172,6 +192,12 @@ function startRace() {
     obj.x = p.x + px * off; obj.z = p.z + pz * off; obj.y = p.y;
     obj.a = Math.atan2(p.tx, p.tz);
     obj.vx = obj.vz = 0; obj.v = 0; obj.s = slots[k];
+    // Park each rival in the lane it was placed in. Left at the constructor's
+    // `this.lat = this.line`, the first frame's lane command pulled it metres
+    // across the grid the instant the lights went out and slid it into the car
+    // alongside — the stuck rival on the launch straight was that, not a stalled
+    // engine.
+    if ('lat' in obj) obj.lat = off;
   };
   put(S.player, 0);
   S.ai.forEach((a, i) => put(a, i + 1));
@@ -192,6 +218,9 @@ function startRace() {
 
   S.raceTime = 0; S.lapStart = 0; S.lapTimes = []; S.bestLap = null;
   S.lapsDone = 0; S.halfDone = false;
+  // A key released while the results/menu overlay had focus never fires keyup here,
+  // and the next race would then open with the throttle already pinned.
+  for (const k in S.keys) S.keys[k] = false;
   S.lastSW = slots[0];
   S.mode = 'count'; S.countT = 0;
   document.getElementById('menu').classList.add('hidden');
@@ -311,7 +340,9 @@ function frame() {
     S.playerView.rotation.set(0, P.a, 0);
     const slope = (near.sm.y - S.track.samples[(near.i + 4) % S.track.samples.length].y) / 10;
     const f = P.forward();
-    S.playerView.rotation.x = -Math.atan2(slope * (f.x * near.sm.tx + f.z * near.sm.tz), 1);
+    // sign flipped with the 'YXZ' order above: this now reads (y_here - y_ahead)/10,
+    // so a climb (-slope) pitches the nose UP
+    S.playerView.rotation.x = Math.atan2(slope * (f.x * near.sm.tx + f.z * near.sm.tz), 1);
     S.playerWheels.forEach(w => { w.rotation.x += vf / 0.33 * dt; });
 
     // drift smoke
@@ -373,9 +404,18 @@ function frame() {
         const nx = dx / d, nz = dz / d, pen = (1 - e) * 3.8;
         S.player.x += nx * pen * 0.55; S.player.z += nz * pen * 0.55;
         a.x -= nx * pen * 0.45; a.z -= nz * pen * 0.45;         // line-smoothing pulls it back
-        const vN = S.player.vx * nx + S.player.vz * nz;
-        if (vN < 0) { const j = -1.35 * vN; S.player.vx += j * nx; S.player.vz += j * nz; }
-        a.v = Math.max(0, a.v - 0.8);
+        // Impulse off the CLOSING speed, shared by both cars. The old form used
+        // only the player's own velocity and took a flat 0.8 m/s off the rival
+        // every FRAME (not per second): rub against a parked car and the rival
+        // lost its whole launch inside ~0.1 s and never got it back — the second
+        // half of the rival-stuck-on-the-grid report.
+        const avx = hx * a.v, avz = hz * a.v;
+        const vN = (S.player.vx - avx) * nx + (S.player.vz - avz) * nz;
+        if (vN < 0) {
+          const j = -0.75 * vN;                       // equal masses, restitution ~0.5
+          S.player.vx += j * nx; S.player.vz += j * nz;
+          a.v = Math.max(0, a.v - j * (nx * hx + nz * hz));   // rival is steered: only
+        }                                             // the component along its heading
         if (pen > 1) {
           const s0 = S.smoke[S.smokeIdx = (S.smokeIdx + 1) % S.smoke.length];
           s0.mesh.position.set((S.player.x + a.x) / 2, S.player.y + 0.5, (S.player.z + a.z) / 2);
@@ -397,10 +437,27 @@ function frame() {
         a.x += nx * pen * 0.5; a.z += nz * pen * 0.5;
         b.x -= nx * pen * 0.5; b.z -= nz * pen * 0.5;
       }
+      // The corridor clamp runs BEFORE contacts, so a rival shove can leave the
+      // player past the barrier face for a frame. Re-clamp position only (the
+      // impact response above already ran) so nobody ends up inside a wall.
+      {
+        const n2 = S.track.nearest(S.player.x, S.player.z, S.player.y), sm2 = n2.sm;
+        const px2 = -sm2.tz, pz2 = sm2.tx;
+        const bLat = (S.player.x - sm2.x) * px2 + (S.player.z - sm2.z) * pz2;
+        const wallLat = S.track.halfWidth * 1.06 - 0.18 - 0.9;
+        const over = Math.abs(bLat) - wallLat;
+        if (over > 0) {
+          const sg = Math.sign(bLat);
+          S.player.x -= px2 * sg * over; S.player.z -= pz2 * sg * over;
+        }
+      }
     }
     S.ai.forEach(a => {
       a.view.position.set(a.x, a.y, a.z);
       a.view.rotation.set(0, a.a, 0);
+      // rivals ride the road surface too; without the grade pitch they sit flat
+      // on the Suzuka deck ramp and the Laguna banking
+      a.view.rotation.x = Math.atan2((a.y - S.track.pointAtS(a.s + 12).y) / 12, 1);
       if (a.wheels) a.wheels.forEach(wh => { wh.rotation.x += a.v / 0.33 * dt; });
     });
 
